@@ -21,14 +21,6 @@ type Openclaw struct{}
 func (c *Openclaw) String() string { return "OpenClaw" }
 
 func (c *Openclaw) Run(model string, args []string) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("OpenClaw runs best on WSL2\n\n" +
-			"Quick setup:\n" +
-			"  wsl --install\n\n" +
-			"Then run ollama launch openclaw from inside WSL.\n" +
-			"Guide: https://docs.openclaw.ai/windows")
-	}
-
 	bin, err := ensureOpenclawInstalled()
 	if err != nil {
 		return err
@@ -72,7 +64,7 @@ func (c *Openclaw) Run(model string, args []string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("openclaw onboarding failed: %w\n\nTry running: openclaw onboard", err)
+			return windowsHint(fmt.Errorf("openclaw onboarding failed: %w\n\nTry running: openclaw onboard", err))
 		}
 	}
 
@@ -86,7 +78,10 @@ func (c *Openclaw) Run(model string, args []string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return windowsHint(err)
+	}
+	return nil
 }
 
 // gatewayInfo reads the gateway auth token and port from the OpenClaw config.
@@ -134,6 +129,16 @@ func printOpenclawReady(bin, token string, port int) {
 	fmt.Fprintf(os.Stderr, "  Or chat in the terminal:\n")
 	fmt.Fprintf(os.Stderr, "    %s tui\n\n", bin)
 	fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
+}
+
+func windowsHint(err error) error {
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	return fmt.Errorf("%w\n\n"+
+		"OpenClaw runs best on WSL2.\n"+
+		"Quick setup: wsl --install\n"+
+		"Guide: https://docs.openclaw.ai/windows", err)
 }
 
 // onboarded checks if OpenClaw onboarding wizard was completed
@@ -193,7 +198,7 @@ func ensureOpenclawInstalled() (string, error) {
 		return "", fmt.Errorf("openclaw installation cancelled")
 	}
 
-	fmt.Fprintf(os.Stderr, "\nInstalling openclaw...\n")
+	fmt.Fprintf(os.Stderr, "\nInstalling OpenClaw...\n")
 	cmd := exec.Command("npm", "install", "-g", "openclaw@latest")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
