@@ -524,7 +524,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", " ":
 			item := m.items[m.cursor]
 
-			if item.integration != "" && !config.IsIntegrationInstalled(item.integration) {
+			if item.integration != "" && !config.IsIntegrationInstalled(item.integration) && !config.IsAutoInstallable(item.integration) {
 				return m, nil
 			}
 
@@ -555,6 +555,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			item := m.items[m.cursor]
 			if item.integration != "" || item.isRunModel {
 				if item.integration != "" && !config.IsIntegrationInstalled(item.integration) {
+					if config.IsAutoInstallable(item.integration) {
+						// Auto-installable: select to trigger install flow
+						m.selected = true
+						m.quitting = true
+						return m, tea.Quit
+					}
 					return m, nil
 				}
 				if item.integration != "" && config.IsEditorIntegration(item.integration) {
@@ -634,7 +640,9 @@ func (m model) View() string {
 
 		desc := item.description
 		if !isInstalled && item.integration != "" && m.cursor == i {
-			if hint := config.IntegrationInstallHint(item.integration); hint != "" {
+			if config.IsAutoInstallable(item.integration) {
+				desc = "Press enter to install"
+			} else if hint := config.IntegrationInstallHint(item.integration); hint != "" {
 				desc = hint
 			} else {
 				desc = "not installed"

@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -874,5 +877,201 @@ func TestOpenclawOnboarded(t *testing.T) {
 		if c.onboarded() {
 			t.Error("expected false when wizard is wrong type")
 		}
+	})
+}
+
+func TestOpenclawGatewayInfo(t *testing.T) {
+	c := &Openclaw{}
+
+	t.Run("returns defaults when no config exists", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+
+		token, port := c.gatewayInfo()
+		if token != "" {
+			t.Errorf("expected empty token, got %q", token)
+		}
+		if port != defaultGatewayPort {
+			t.Errorf("expected default port %d, got %d", defaultGatewayPort, port)
+		}
+	})
+
+	t.Run("reads token and port from config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{
+			"gateway": {
+				"port": 9999,
+				"auth": {"mode": "token", "token": "my-secret"}
+			}
+		}`), 0o644)
+
+		token, port := c.gatewayInfo()
+		if token != "my-secret" {
+			t.Errorf("expected token %q, got %q", "my-secret", token)
+		}
+		if port != 9999 {
+			t.Errorf("expected port 9999, got %d", port)
+		}
+	})
+
+	t.Run("uses default port when not in config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{
+			"gateway": {"auth": {"token": "tok"}}
+		}`), 0o644)
+
+		token, port := c.gatewayInfo()
+		if token != "tok" {
+			t.Errorf("expected token %q, got %q", "tok", token)
+		}
+		if port != defaultGatewayPort {
+			t.Errorf("expected default port %d, got %d", defaultGatewayPort, port)
+		}
+	})
+
+	t.Run("falls back to legacy clawdbot config", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		legacyDir := filepath.Join(tmpDir, ".clawdbot")
+		os.MkdirAll(legacyDir, 0o755)
+		os.WriteFile(filepath.Join(legacyDir, "clawdbot.json"), []byte(`{
+			"gateway": {"port": 12345, "auth": {"token": "legacy-token"}}
+		}`), 0o644)
+
+		token, port := c.gatewayInfo()
+		if token != "legacy-token" {
+			t.Errorf("expected token %q, got %q", "legacy-token", token)
+		}
+		if port != 12345 {
+			t.Errorf("expected port 12345, got %d", port)
+		}
+	})
+
+	t.Run("handles corrupted JSON gracefully", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{corrupted`), 0o644)
+
+		token, port := c.gatewayInfo()
+		if token != "" {
+			t.Errorf("expected empty token, got %q", token)
+		}
+		if port != defaultGatewayPort {
+			t.Errorf("expected default port, got %d", port)
+		}
+	})
+
+	t.Run("handles missing gateway section", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{"theme":"dark"}`), 0o644)
+
+		token, port := c.gatewayInfo()
+		if token != "" {
+			t.Errorf("expected empty token, got %q", token)
+		}
+		if port != defaultGatewayPort {
+			t.Errorf("expected default port, got %d", port)
+		}
+	})
+}
+
+func TestPrintOpenclawReady(t *testing.T) {
+	t.Run("includes port in URL", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "", 9999)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		if !strings.Contains(output, "localhost:9999") {
+			t.Errorf("expected port 9999 in output, got:\n%s", output)
+		}
+		if strings.Contains(output, "#token=") {
+			t.Error("should not include token fragment when token is empty")
+		}
+	})
+
+	t.Run("URL-escapes token", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "my token&special=chars", defaultGatewayPort)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		escaped := url.QueryEscape("my token&special=chars")
+		if !strings.Contains(output, "#token="+escaped) {
+			t.Errorf("expected URL-escaped token %q in output, got:\n%s", escaped, output)
+		}
+	})
+
+	t.Run("simple token is not mangled", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "ollama", defaultGatewayPort)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		if !strings.Contains(output, "#token=ollama") {
+			t.Errorf("expected #token=ollama in output, got:\n%s", output)
+		}
+	})
+
+	t.Run("includes tui hint", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "", defaultGatewayPort)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		if !strings.Contains(output, "openclaw tui") {
+			t.Errorf("expected tui hint in output, got:\n%s", output)
+		}
+	})
+}
+
+func TestCheckNodeVersion(t *testing.T) {
+	t.Run("valid version above minimum", func(t *testing.T) {
+		// This test depends on the actual node version installed.
+		// Skip if node is not available.
+		if _, err := os.Stat("/usr/local/bin/node"); err != nil {
+			t.Skip("node not available")
+		}
+		// Just verify it doesn't panic
+		_ = checkNodeVersion()
 	})
 }

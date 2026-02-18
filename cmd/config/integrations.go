@@ -228,6 +228,17 @@ func IsIntegrationInstalled(name string) bool {
 	}
 }
 
+// IsAutoInstallable returns true if the integration can be automatically
+// installed when not found (e.g. via npm).
+func IsAutoInstallable(name string) bool {
+	switch strings.ToLower(name) {
+	case "openclaw", "clawdbot", "moltbot":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsEditorIntegration returns true if the named integration uses multi-model
 // selection (implements the Editor interface).
 func IsEditorIntegration(name string) bool {

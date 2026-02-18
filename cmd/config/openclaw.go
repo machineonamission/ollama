@@ -1,31 +1,30 @@
 package config
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/ollama/ollama/envconfig"
+	"golang.org/x/mod/semver"
 )
+
+const defaultGatewayPort = 18789
 
 type Openclaw struct{}
 
 func (c *Openclaw) String() string { return "OpenClaw" }
 
 func (c *Openclaw) Run(model string, args []string) error {
-	bin := "openclaw"
-	if _, err := exec.LookPath(bin); err != nil {
-		bin = "clawdbot"
-		if _, err := exec.LookPath(bin); err != nil {
-			return fmt.Errorf("openclaw is not installed, install from https://docs.openclaw.ai")
-		}
+	bin, err := ensureOpenclawInstalled()
+	if err != nil {
+		return err
 	}
 
 	models := []string{model}
@@ -34,7 +33,6 @@ func (c *Openclaw) Run(model string, args []string) error {
 	} else if config, err := loadIntegration("clawdbot"); err == nil && len(config.Models) > 0 {
 		models = config.Models
 	}
-	var err error
 	models, err = resolveEditorModels("openclaw", models, func() ([]string, error) {
 		return selectModels(context.Background(), "openclaw", "")
 	})
@@ -49,33 +47,83 @@ func (c *Openclaw) Run(model string, args []string) error {
 	}
 
 	if !c.onboarded() {
-		// Onboarding not completed: run it (model already set via Edit)
-		// Use "ollama" as gateway token for simple local access
+		fmt.Fprintf(os.Stderr, "\n%sSetting up OpenClaw with Ollama...%s\n", ansiGreen, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  Model: %s%s\n\n", ansiGray, models[0], ansiReset)
+
 		cmd := exec.Command(bin, "onboard",
+			"--non-interactive",
+			"--accept-risk",
 			"--auth-choice", "skip",
 			"--gateway-token", "ollama",
+			"--skip-channels",
+			"--skip-skills",
 		)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("openclaw onboarding failed: %w\n\nTry running: openclaw onboard", err)
+		}
 	}
 
-	// Onboarding completed: run gateway
-	cmd := exec.Command(bin, append([]string{"gateway"}, args...)...)
+	// Run gateway in the foreground so the user can see it's alive
+	// and ctrl+C cleanly shuts it down.
+	token, port := c.gatewayInfo()
+	printOpenclawReady(bin, token, port)
+	fmt.Fprintf(os.Stderr, "%sPress Ctrl+C to stop%s\n\n", ansiGray, ansiReset)
+
+	cmd := exec.Command(bin, "gateway", "run")
 	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
 
-	// Capture output to detect "already running" message
-	var outputBuf bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &outputBuf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &outputBuf)
-
-	err = cmd.Run()
-	if err != nil && strings.Contains(outputBuf.String(), "Gateway already running") {
-		fmt.Fprintf(os.Stderr, "%sOpenClaw has been configured with Ollama. Gateway is already running.%s\n", ansiGreen, ansiReset)
-		return nil
+// gatewayInfo reads the gateway auth token and port from the OpenClaw config.
+func (c *Openclaw) gatewayInfo() (token string, port int) {
+	port = defaultGatewayPort
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", port
 	}
-	return err
+
+	for _, path := range []string{
+		filepath.Join(home, ".openclaw", "openclaw.json"),
+		filepath.Join(home, ".clawdbot", "clawdbot.json"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var config map[string]any
+		if json.Unmarshal(data, &config) != nil {
+			continue
+		}
+		gw, _ := config["gateway"].(map[string]any)
+		if p, ok := gw["port"].(float64); ok && p > 0 {
+			port = int(p)
+		}
+		auth, _ := gw["auth"].(map[string]any)
+		if t, _ := auth["token"].(string); t != "" {
+			token = t
+		}
+		return token, port
+	}
+	return "", port
+}
+
+func printOpenclawReady(bin, token string, port int) {
+	u := fmt.Sprintf("http://localhost:%d", port)
+	if token != "" {
+		u += "/#token=" + url.QueryEscape(token)
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s✓ OpenClaw is running%s\n\n", ansiGreen, ansiReset)
+	fmt.Fprintf(os.Stderr, "  Open the Web UI:\n")
+	fmt.Fprintf(os.Stderr, "    %s\n\n", hyperlink(u, u))
+	fmt.Fprintf(os.Stderr, "  Or chat in the terminal:\n")
+	fmt.Fprintf(os.Stderr, "    %s tui\n\n", bin)
+	fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
 }
 
 // onboarded checks if OpenClaw onboarding wizard was completed
@@ -105,6 +153,73 @@ func (c *Openclaw) onboarded() bool {
 	}
 	lastRunAt, _ := wizard["lastRunAt"].(string)
 	return lastRunAt != ""
+}
+
+func ensureOpenclawInstalled() (string, error) {
+	if _, err := exec.LookPath("openclaw"); err == nil {
+		return "openclaw", nil
+	}
+	if _, err := exec.LookPath("clawdbot"); err == nil {
+		return "clawdbot", nil
+	}
+
+	if _, err := exec.LookPath("npm"); err != nil {
+		return "", fmt.Errorf("openclaw is not installed and npm was not found\n\n" +
+			"To install OpenClaw, first install Node.js (>= 22.12.0):\n" +
+			"  https://nodejs.org/\n\n" +
+			"Then run:\n" +
+			"  npm install -g openclaw@latest")
+	}
+
+	if err := checkNodeVersion(); err != nil {
+		return "", err
+	}
+
+	ok, err := confirmPrompt("OpenClaw is not installed. Install with npm?")
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("openclaw installation cancelled")
+	}
+
+	fmt.Fprintf(os.Stderr, "\nInstalling openclaw...\n")
+	cmd := exec.Command("npm", "install", "-g", "openclaw@latest")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if os.IsPermission(err) {
+			return "", fmt.Errorf("permission denied installing openclaw\n\nTry running:\n  sudo npm install -g openclaw@latest")
+		}
+		return "", fmt.Errorf("failed to install openclaw: %w", err)
+	}
+
+	if _, err := exec.LookPath("openclaw"); err != nil {
+		return "", fmt.Errorf("openclaw was installed but the binary was not found on PATH\n\nYou may need to restart your shell")
+	}
+
+	fmt.Fprintf(os.Stderr, "%sOpenClaw installed successfully%s\n\n", ansiGreen, ansiReset)
+	return "openclaw", nil
+}
+
+func checkNodeVersion() error {
+	out, err := exec.Command("node", "--version").Output()
+	if err != nil {
+		return fmt.Errorf("openclaw requires Node.js (>= 22.12.0) but node was not found\n\n" +
+			"Install from: https://nodejs.org/")
+	}
+
+	version := strings.TrimSpace(string(out))
+	if !semver.IsValid(version) {
+		return fmt.Errorf("unexpected node version format: %s", version)
+	}
+
+	if semver.Compare(version, "v22.12.0") < 0 {
+		return fmt.Errorf("openclaw requires Node.js >= 22.12.0 but found %s\n\n"+
+			"Update from: https://nodejs.org/", version)
+	}
+	return nil
 }
 
 func (c *Openclaw) Paths() []string {
