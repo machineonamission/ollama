@@ -17,7 +17,6 @@ import (
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/types/model"
-	"golang.org/x/mod/semver"
 )
 
 const defaultGatewayPort = 18789
@@ -82,6 +81,7 @@ func (c *Openclaw) Run(model string, args []string) error {
 	// start it as a background child process.
 	if !portOpen(addr) {
 		gw := exec.Command(bin, "gateway", "run", "--force")
+		gw.Env = openclawEnv()
 		if err := gw.Start(); err != nil {
 			return windowsHint(fmt.Errorf("failed to start gateway: %w", err))
 		}
@@ -98,15 +98,17 @@ func (c *Openclaw) Run(model string, args []string) error {
 		return windowsHint(fmt.Errorf("gateway did not start on %s", addr))
 	}
 
-	printOpenclawReady(bin, token, port)
+	firstLaunch := c.hasBootstrap()
+	printOpenclawReady(bin, token, port, firstLaunch)
 
 	// Drop user into the TUI. On first launch, trigger the bootstrap
 	// ritual with an initial message (matches openclaw's own onboarding).
 	tuiArgs := []string{"tui"}
-	if c.hasBootstrap() {
+	if firstLaunch {
 		tuiArgs = append(tuiArgs, "--message", "Wake up, my friend!")
 	}
 	tui := exec.Command(bin, tuiArgs...)
+	tui.Env = openclawEnv()
 	tui.Stdin = os.Stdin
 	tui.Stdout = os.Stdout
 	tui.Stderr = os.Stderr
@@ -149,7 +151,7 @@ func (c *Openclaw) gatewayInfo() (token string, port int) {
 	return "", port
 }
 
-func printOpenclawReady(bin, token string, port int) {
+func printOpenclawReady(bin, token string, port int, firstLaunch bool) {
 	u := fmt.Sprintf("http://localhost:%d", port)
 	if token != "" {
 		u += "/#token=" + url.QueryEscape(token)
@@ -160,7 +162,44 @@ func printOpenclawReady(bin, token string, port int) {
 	fmt.Fprintf(os.Stderr, "    %s\n\n", hyperlink(u, u))
 	fmt.Fprintf(os.Stderr, "  Or chat in the terminal:\n")
 	fmt.Fprintf(os.Stderr, "    %s tui\n\n", bin)
-	fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
+
+	if firstLaunch {
+		fmt.Fprintf(os.Stderr, "%s  Quick start:%s\n", ansiBold, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    /help             see all commands%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    /model            switch between Ollama models%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    /think low|high   adjust reasoning depth%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    ! <command>       run a shell command%s\n\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  Set up later:%s\n", ansiBold, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    %s configure --section channels   connect WhatsApp, Telegram, etc.%s\n", ansiGray, bin, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s    %s skills                         browse and install skills%s\n\n", ansiGray, bin, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  The OpenClaw gateway is running in the background.%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  Stop it with: %s gateway stop%s\n\n", ansiGray, bin, ansiReset)
+	} else {
+		fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
+	}
+}
+
+// openclawEnv returns the current environment with provider API keys cleared
+// so openclaw only uses the Ollama gateway, not keys from the user's shell.
+func openclawEnv() []string {
+	clear := map[string]bool{
+		"ANTHROPIC_API_KEY":     true,
+		"ANTHROPIC_OAUTH_TOKEN": true,
+		"OPENAI_API_KEY":        true,
+		"GEMINI_API_KEY":        true,
+		"MISTRAL_API_KEY":       true,
+		"GROQ_API_KEY":          true,
+		"XAI_API_KEY":           true,
+		"OPENROUTER_API_KEY":    true,
+	}
+	var env []string
+	for _, e := range os.Environ() {
+		key, _, _ := strings.Cut(e, "=")
+		if !clear[key] {
+			env = append(env, e)
+		}
+	}
+	return env
 }
 
 // portOpen checks if a TCP port is currently accepting connections.
@@ -250,14 +289,10 @@ func ensureOpenclawInstalled() (string, error) {
 
 	if _, err := exec.LookPath("npm"); err != nil {
 		return "", fmt.Errorf("openclaw is not installed and npm was not found\n\n" +
-			"To install OpenClaw, first install Node.js (>= 22.12.0):\n" +
+			"To install OpenClaw, first install Node.js:\n" +
 			"  https://nodejs.org/\n\n" +
 			"Then run:\n" +
 			"  npm install -g openclaw@latest")
-	}
-
-	if err := checkNodeVersion(); err != nil {
-		return "", err
 	}
 
 	ok, err := confirmPrompt("OpenClaw is not installed. Install with npm?")
@@ -274,9 +309,6 @@ func ensureOpenclawInstalled() (string, error) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		if os.IsPermission(err) {
-			return "", fmt.Errorf("permission denied installing openclaw\n\nTry running:\n  sudo npm install -g openclaw@latest")
-		}
 		return "", fmt.Errorf("failed to install openclaw: %w", err)
 	}
 
@@ -286,25 +318,6 @@ func ensureOpenclawInstalled() (string, error) {
 
 	fmt.Fprintf(os.Stderr, "%sOpenClaw installed successfully%s\n\n", ansiGreen, ansiReset)
 	return "openclaw", nil
-}
-
-func checkNodeVersion() error {
-	out, err := exec.Command("node", "--version").Output()
-	if err != nil {
-		return fmt.Errorf("openclaw requires Node.js (>= 22.12.0) but node was not found\n\n" +
-			"Install from: https://nodejs.org/")
-	}
-
-	version := strings.TrimSpace(string(out))
-	if !semver.IsValid(version) {
-		return fmt.Errorf("unexpected node version format: %s", version)
-	}
-
-	if semver.Compare(version, "v22.12.0") < 0 {
-		return fmt.Errorf("openclaw requires Node.js >= 22.12.0 but found %s\n\n"+
-			"Update from: https://nodejs.org/", version)
-	}
-	return nil
 }
 
 func (c *Openclaw) Paths() []string {

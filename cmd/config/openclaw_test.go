@@ -995,7 +995,7 @@ func TestPrintOpenclawReady(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		printOpenclawReady("openclaw", "", 9999)
+		printOpenclawReady("openclaw", "", 9999, false)
 
 		w.Close()
 		os.Stderr = old
@@ -1016,7 +1016,7 @@ func TestPrintOpenclawReady(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		printOpenclawReady("openclaw", "my token&special=chars", defaultGatewayPort)
+		printOpenclawReady("openclaw", "my token&special=chars", defaultGatewayPort, false)
 
 		w.Close()
 		os.Stderr = old
@@ -1035,7 +1035,7 @@ func TestPrintOpenclawReady(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		printOpenclawReady("openclaw", "ollama", defaultGatewayPort)
+		printOpenclawReady("openclaw", "ollama", defaultGatewayPort, false)
 
 		w.Close()
 		os.Stderr = old
@@ -1053,7 +1053,7 @@ func TestPrintOpenclawReady(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		printOpenclawReady("openclaw", "", defaultGatewayPort)
+		printOpenclawReady("openclaw", "", defaultGatewayPort, false)
 
 		w.Close()
 		os.Stderr = old
@@ -1064,17 +1064,46 @@ func TestPrintOpenclawReady(t *testing.T) {
 			t.Errorf("expected tui hint in output, got:\n%s", output)
 		}
 	})
-}
 
-func TestCheckNodeVersion(t *testing.T) {
-	t.Run("valid version above minimum", func(t *testing.T) {
-		// This test depends on the actual node version installed.
-		// Skip if node is not available.
-		if _, err := os.Stat("/usr/local/bin/node"); err != nil {
-			t.Skip("node not available")
+	t.Run("first launch shows quick start tips", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "ollama", defaultGatewayPort, true)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		for _, want := range []string{"/help", "/model", "/think", "! <command>", "channels", "skills", "gateway"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("expected %q in first-launch output, got:\n%s", want, output)
+			}
 		}
-		// Just verify it doesn't panic
-		_ = checkNodeVersion()
+	})
+
+	t.Run("subsequent launch shows single tip", func(t *testing.T) {
+		var buf bytes.Buffer
+		old := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		printOpenclawReady("openclaw", "ollama", defaultGatewayPort, false)
+
+		w.Close()
+		os.Stderr = old
+		buf.ReadFrom(r)
+
+		output := buf.String()
+		if !strings.Contains(output, "Tip:") {
+			t.Errorf("expected single tip line, got:\n%s", output)
+		}
+		if strings.Contains(output, "Quick start") {
+			t.Errorf("should not show quick start on subsequent launch")
+		}
 	})
 }
 
@@ -1331,6 +1360,67 @@ func TestOpenclawModelConfig(t *testing.T) {
 		}
 		if cfg["maxTokens"] != 128_000 {
 			t.Errorf("maxTokens = %v, want 128000", cfg["maxTokens"])
+		}
+	})
+}
+
+func TestIntegrationOnboarded(t *testing.T) {
+	t.Run("returns false when not set", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+
+		if IntegrationOnboarded("openclaw") {
+			t.Error("expected false for fresh config")
+		}
+	})
+
+	t.Run("returns true after SetIntegrationOnboarded", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		os.MkdirAll(filepath.Join(tmpDir, ".ollama"), 0o755)
+
+		if err := SetIntegrationOnboarded("openclaw"); err != nil {
+			t.Fatal(err)
+		}
+		if !IntegrationOnboarded("openclaw") {
+			t.Error("expected true after SetIntegrationOnboarded")
+		}
+	})
+
+	t.Run("is case insensitive", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		os.MkdirAll(filepath.Join(tmpDir, ".ollama"), 0o755)
+
+		if err := SetIntegrationOnboarded("OpenClaw"); err != nil {
+			t.Fatal(err)
+		}
+		if !IntegrationOnboarded("openclaw") {
+			t.Error("expected true when set with different case")
+		}
+	})
+
+	t.Run("preserves existing integration data", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		os.MkdirAll(filepath.Join(tmpDir, ".ollama"), 0o755)
+
+		if err := SaveIntegration("openclaw", []string{"llama3.2", "mistral"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := SetIntegrationOnboarded("openclaw"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify onboarded is set
+		if !IntegrationOnboarded("openclaw") {
+			t.Error("expected true after SetIntegrationOnboarded")
+		}
+
+		// Verify models are preserved
+		model := IntegrationModel("openclaw")
+		if model != "llama3.2" {
+			t.Errorf("expected first model llama3.2, got %q", model)
 		}
 	})
 }
