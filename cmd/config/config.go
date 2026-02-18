@@ -15,8 +15,9 @@ import (
 )
 
 type integration struct {
-	Models  []string          `json:"models"`
-	Aliases map[string]string `json:"aliases,omitempty"`
+	Models    []string          `json:"models"`
+	Aliases   map[string]string `json:"aliases,omitempty"`
+	Onboarded bool              `json:"onboarded,omitempty"`
 }
 
 type config struct {
@@ -139,16 +140,45 @@ func SaveIntegration(appName string, models []string) error {
 	key := strings.ToLower(appName)
 	existing := cfg.Integrations[key]
 	var aliases map[string]string
-	if existing != nil && existing.Aliases != nil {
+	var onboarded bool
+	if existing != nil {
 		aliases = existing.Aliases
+		onboarded = existing.Onboarded
 	}
 
 	cfg.Integrations[key] = &integration{
-		Models:  models,
-		Aliases: aliases,
+		Models:    models,
+		Aliases:   aliases,
+		Onboarded: onboarded,
 	}
 
 	return save(cfg)
+}
+
+// SetIntegrationOnboarded marks an integration as onboarded in ollama's config.
+func SetIntegrationOnboarded(appName string) error {
+	cfg, err := load()
+	if err != nil {
+		return err
+	}
+
+	key := strings.ToLower(appName)
+	existing := cfg.Integrations[key]
+	if existing == nil {
+		existing = &integration{}
+	}
+	existing.Onboarded = true
+	cfg.Integrations[key] = existing
+	return save(cfg)
+}
+
+// IntegrationOnboarded returns true if the integration has been onboarded through ollama.
+func IntegrationOnboarded(appName string) bool {
+	ic, err := loadIntegration(appName)
+	if err != nil {
+		return false
+	}
+	return ic.Onboarded
 }
 
 // IntegrationModel returns the first configured model for an integration, or empty string if not configured.

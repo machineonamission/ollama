@@ -1,9 +1,7 @@
 package config
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -27,28 +25,31 @@ func (c *Openclaw) Run(model string, args []string) error {
 		return err
 	}
 
-	models := []string{model}
-	if config, err := loadIntegration("openclaw"); err == nil && len(config.Models) > 0 {
-		models = config.Models
-	} else if config, err := loadIntegration("clawdbot"); err == nil && len(config.Models) > 0 {
-		models = config.Models
-	}
-	models, err = resolveEditorModels("openclaw", models, func() ([]string, error) {
-		return selectModels(context.Background(), "openclaw", "")
-	})
-	if errors.Is(err, errCancelled) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if err := c.Edit(models); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+	if !IntegrationOnboarded("openclaw") {
+		fmt.Fprintf(os.Stderr, "\n%s┌ Security%s\n", ansiBold, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s│%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s│%s  OpenClaw can read files and run actions when tools are enabled.\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s│%s  A bad prompt can trick it into doing unsafe things.\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s│%s\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s│%s  Learn more: https://docs.openclaw.ai/gateway/security\n", ansiGray, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s└%s\n\n", ansiGray, ansiReset)
+
+		ok, err := confirmPrompt("I understand the risks. Continue?")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+
+		if err := SetIntegrationOnboarded("openclaw"); err != nil {
+			return fmt.Errorf("failed to save onboarding state: %w", err)
+		}
 	}
 
 	if !c.onboarded() {
 		fmt.Fprintf(os.Stderr, "\n%sSetting up OpenClaw with Ollama...%s\n", ansiGreen, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s  Model: %s%s\n\n", ansiGray, models[0], ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  Model: %s%s\n\n", ansiGray, model, ansiReset)
 
 		cmd := exec.Command(bin, "onboard",
 			"--non-interactive",

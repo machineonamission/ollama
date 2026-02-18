@@ -228,9 +228,9 @@ func IsIntegrationInstalled(name string) bool {
 	}
 }
 
-// IsAutoInstallable returns true if the integration can be automatically
+// AutoInstallable returns true if the integration can be automatically
 // installed when not found (e.g. via npm).
-func IsAutoInstallable(name string) bool {
+func AutoInstallable(name string) bool {
 	switch strings.ToLower(name) {
 	case "openclaw", "clawdbot", "moltbot":
 		return true
@@ -935,6 +935,16 @@ Examples:
 			r, ok := integrations[strings.ToLower(name)]
 			if !ok {
 				return fmt.Errorf("unknown integration: %s", name)
+			}
+
+			// Auto-installable integrations: ensure binary is installed
+			// before model selection / config changes.
+			if AutoInstallable(name) {
+				if _, ok := r.(*Openclaw); ok {
+					if _, err := ensureOpenclawInstalled(); err != nil {
+						return err
+					}
+				}
 			}
 
 			if modelFlag != "" && IsCloudModelDisabled(cmd.Context(), modelFlag) {
