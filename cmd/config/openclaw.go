@@ -1,16 +1,22 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"time"
 
+	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/types/model"
 	"golang.org/x/mod/semver"
 )
 
@@ -68,17 +74,35 @@ func (c *Openclaw) Run(model string, args []string) error {
 		}
 	}
 
-	// Run gateway in the foreground so the user can see it's alive
-	// and ctrl+C cleanly shuts it down.
 	token, port := c.gatewayInfo()
-	printOpenclawReady(bin, token, port)
-	fmt.Fprintf(os.Stderr, "%sPress Ctrl+C to stop%s\n\n", ansiGray, ansiReset)
 
-	cmd := exec.Command(bin, "gateway", "run")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	// Start gateway in the background, killing any existing instance.
+	gw := exec.Command(bin, "gateway", "run", "--force")
+	if err := gw.Start(); err != nil {
+		return windowsHint(fmt.Errorf("failed to start gateway: %w", err))
+	}
+	defer func() {
+		if gw.Process != nil {
+			_ = gw.Process.Kill()
+			_ = gw.Wait()
+		}
+	}()
+
+	// Wait for gateway to accept connections.
+	addr := fmt.Sprintf("localhost:%d", port)
+	if !waitForPort(addr, 30*time.Second) {
+		return windowsHint(fmt.Errorf("gateway did not start on %s", addr))
+	}
+
+	printOpenclawReady(bin, token, port)
+
+	// Drop user into the TUI. When they exit, the deferred kill
+	// cleans up the gateway.
+	tui := exec.Command(bin, "tui")
+	tui.Stdin = os.Stdin
+	tui.Stdout = os.Stdout
+	tui.Stderr = os.Stderr
+	if err := tui.Run(); err != nil {
 		return windowsHint(err)
 	}
 	return nil
@@ -129,6 +153,19 @@ func printOpenclawReady(bin, token string, port int) {
 	fmt.Fprintf(os.Stderr, "  Or chat in the terminal:\n")
 	fmt.Fprintf(os.Stderr, "    %s tui\n\n", bin)
 	fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
+}
+
+func waitForPort(addr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
 }
 
 func windowsHint(err error) error {
@@ -305,25 +342,13 @@ func (c *Openclaw) Edit(models []string) error {
 		}
 	}
 
+	client, _ := api.ClientFromEnvironment()
+
 	var newModels []any
-	for _, model := range models {
-		entry := map[string]any{
-			"id":        model,
-			"name":      model,
-			"reasoning": false,
-			"input":     []any{"text"},
-			"cost": map[string]any{
-				"input":      0,
-				"output":     0,
-				"cacheRead":  0,
-				"cacheWrite": 0,
-			},
-			// TODO(parthsareen): get these values from API
-			"contextWindow": 131072,
-			"maxTokens":     16384,
-		}
+	for _, m := range models {
+		entry := openclawModelConfig(context.Background(), client, m)
 		// Merge existing fields (user customizations)
-		if existing, ok := existingByID[model]; ok {
+		if existing, ok := existingByID[m]; ok {
 			for k, v := range existing {
 				if _, isNew := entry[k]; !isNew {
 					entry[k] = v
@@ -361,6 +386,61 @@ func (c *Openclaw) Edit(models []string) error {
 		return err
 	}
 	return writeWithBackup(configPath, data)
+}
+
+// openclawModelConfig builds an OpenClaw model config entry with capability detection.
+func openclawModelConfig(ctx context.Context, client *api.Client, modelID string) map[string]any {
+	entry := map[string]any{
+		"id":    modelID,
+		"name":  modelID,
+		"input": []any{"text"},
+		"cost": map[string]any{
+			"input":      0,
+			"output":     0,
+			"cacheRead":  0,
+			"cacheWrite": 0,
+		},
+	}
+
+	// Cloud models: use hardcoded limits
+	if isCloudModel(ctx, client, modelID) {
+		if l, ok := lookupCloudModelLimit(modelID); ok {
+			entry["contextWindow"] = l.Context
+			entry["maxTokens"] = l.Output
+		}
+		return entry
+	}
+
+	if client == nil {
+		return entry
+	}
+
+	resp, err := client.Show(ctx, &api.ShowRequest{Model: modelID})
+	if err != nil {
+		return entry
+	}
+
+	// Set input types based on vision capability
+	if slices.Contains(resp.Capabilities, model.CapabilityVision) {
+		entry["input"] = []any{"text", "image"}
+	}
+
+	// Set reasoning based on thinking capability
+	if slices.Contains(resp.Capabilities, model.CapabilityThinking) {
+		entry["reasoning"] = true
+	}
+
+	// Extract context window from ModelInfo
+	for key, val := range resp.ModelInfo {
+		if strings.HasSuffix(key, ".context_length") {
+			if ctxLen, ok := val.(float64); ok && ctxLen > 0 {
+				entry["contextWindow"] = int(ctxLen)
+			}
+			break
+		}
+	}
+
+	return entry
 }
 
 func (c *Openclaw) Models() []string {

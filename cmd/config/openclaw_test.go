@@ -2,13 +2,18 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ollama/ollama/api"
 )
 
 func TestOpenclawIntegration(t *testing.T) {
@@ -362,18 +367,15 @@ func TestOpenclawEditSchemaFields(t *testing.T) {
 	modelList := ollama["models"].([]any)
 	entry := modelList[0].(map[string]any)
 
-	// Verify required schema fields
-	if entry["reasoning"] != false {
-		t.Error("reasoning should be false")
+	// Verify base schema fields (always set regardless of API availability)
+	if entry["id"] != "llama3.2" {
+		t.Errorf("id = %v, want llama3.2", entry["id"])
+	}
+	if entry["name"] != "llama3.2" {
+		t.Errorf("name = %v, want llama3.2", entry["name"])
 	}
 	if entry["input"] == nil {
 		t.Error("input should be set")
-	}
-	if entry["contextWindow"] == nil {
-		t.Error("contextWindow should be set")
-	}
-	if entry["maxTokens"] == nil {
-		t.Error("maxTokens should be set")
 	}
 	cost := entry["cost"].(map[string]any)
 	if cost["cacheRead"] == nil {
@@ -1073,5 +1075,212 @@ func TestCheckNodeVersion(t *testing.T) {
 		}
 		// Just verify it doesn't panic
 		_ = checkNodeVersion()
+	})
+}
+
+func TestOpenclawModelConfig(t *testing.T) {
+	t.Run("nil client returns base config", func(t *testing.T) {
+		cfg := openclawModelConfig(context.Background(), nil, "llama3.2")
+
+		if cfg["id"] != "llama3.2" {
+			t.Errorf("id = %v, want llama3.2", cfg["id"])
+		}
+		if cfg["name"] != "llama3.2" {
+			t.Errorf("name = %v, want llama3.2", cfg["name"])
+		}
+		if cfg["cost"] == nil {
+			t.Error("cost should be set")
+		}
+		// Should not have capability fields without API
+		if _, ok := cfg["reasoning"]; ok {
+			t.Error("reasoning should not be set without API")
+		}
+		if _, ok := cfg["contextWindow"]; ok {
+			t.Error("contextWindow should not be set without API")
+		}
+	})
+
+	t.Run("sets vision input when model has vision capability", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":["vision"],"model_info":{"llama.context_length":4096}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "llava:7b")
+
+		input, ok := cfg["input"].([]any)
+		if !ok || len(input) != 2 {
+			t.Errorf("input = %v, want [text image]", cfg["input"])
+		}
+	})
+
+	t.Run("sets text-only input when model lacks vision", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":["completion"],"model_info":{}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "llama3.2")
+
+		input, ok := cfg["input"].([]any)
+		if !ok || len(input) != 1 {
+			t.Errorf("input = %v, want [text]", cfg["input"])
+		}
+		if _, ok := cfg["reasoning"]; ok {
+			t.Error("reasoning should not be set for non-thinking model")
+		}
+	})
+
+	t.Run("sets reasoning when model has thinking capability", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":["thinking"],"model_info":{}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "qwq")
+
+		if cfg["reasoning"] != true {
+			t.Error("expected reasoning = true for thinking model")
+		}
+	})
+
+	t.Run("extracts context window from model info", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":[],"model_info":{"llama.context_length":131072}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "llama3.2")
+
+		if cfg["contextWindow"] != 131072 {
+			t.Errorf("contextWindow = %v, want 131072", cfg["contextWindow"])
+		}
+	})
+
+	t.Run("handles all capabilities together", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":["vision","thinking"],"model_info":{"qwen3.context_length":32768}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "qwen3-vision")
+
+		input, ok := cfg["input"].([]any)
+		if !ok || len(input) != 2 {
+			t.Errorf("input = %v, want [text image]", cfg["input"])
+		}
+		if cfg["reasoning"] != true {
+			t.Error("expected reasoning = true")
+		}
+		if cfg["contextWindow"] != 32768 {
+			t.Errorf("contextWindow = %v, want 32768", cfg["contextWindow"])
+		}
+	})
+
+	t.Run("returns base config when show fails", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `{"error":"model not found"}`)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "missing-model")
+
+		if cfg["id"] != "missing-model" {
+			t.Errorf("id = %v, want missing-model", cfg["id"])
+		}
+		// Should still have input (default)
+		if cfg["input"] == nil {
+			t.Error("input should always be set")
+		}
+		if _, ok := cfg["reasoning"]; ok {
+			t.Error("reasoning should not be set when show fails")
+		}
+		if _, ok := cfg["contextWindow"]; ok {
+			t.Error("contextWindow should not be set when show fails")
+		}
+	})
+
+	t.Run("skips zero context length", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":[],"model_info":{"llama.context_length":0}}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "test-model")
+
+		if _, ok := cfg["contextWindow"]; ok {
+			t.Error("contextWindow should not be set for zero value")
+		}
+	})
+
+	t.Run("cloud model uses hardcoded limits", func(t *testing.T) {
+		// Use a model name that's in cloudModelLimits and make the server
+		// report it as a remote/cloud model
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/show" {
+				fmt.Fprintf(w, `{"capabilities":[],"model_info":{},"remote_model":"minimax-m2.5"}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		u, _ := url.Parse(srv.URL)
+		client := api.NewClient(u, srv.Client())
+
+		cfg := openclawModelConfig(context.Background(), client, "minimax-m2.5:cloud")
+
+		if cfg["contextWindow"] != 204_800 {
+			t.Errorf("contextWindow = %v, want 204800", cfg["contextWindow"])
+		}
+		if cfg["maxTokens"] != 128_000 {
+			t.Errorf("maxTokens = %v, want 128000", cfg["maxTokens"])
+		}
 	})
 }
