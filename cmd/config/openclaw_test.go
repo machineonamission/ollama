@@ -1078,7 +1078,7 @@ func TestPrintOpenclawReady(t *testing.T) {
 		buf.ReadFrom(r)
 
 		output := buf.String()
-		for _, want := range []string{"/help", "/model", "/think", "! <command>", "channels", "skills", "gateway"} {
+		for _, want := range []string{"/help", "channels", "skills", "gateway"} {
 			if !strings.Contains(output, want) {
 				t.Errorf("expected %q in first-launch output, got:\n%s", want, output)
 			}

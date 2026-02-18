@@ -31,14 +31,13 @@ func (c *Openclaw) Run(model string, args []string) error {
 		return err
 	}
 
-	if !IntegrationOnboarded("openclaw") {
-		fmt.Fprintf(os.Stderr, "\n%s┌ Security%s\n", ansiBold, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s│%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s│%s  OpenClaw can read files and run actions when tools are enabled.\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s│%s  A bad prompt can trick it into doing unsafe things.\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s│%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s│%s  Learn more: https://docs.openclaw.ai/gateway/security\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s└%s\n\n", ansiGray, ansiReset)
+	firstLaunch := !IntegrationOnboarded("openclaw")
+
+	if firstLaunch {
+		fmt.Fprintf(os.Stderr, "\n%sSecurity%s\n\n", ansiBold, ansiReset)
+		fmt.Fprintf(os.Stderr, "  OpenClaw can read files and run actions when tools are enabled.\n")
+		fmt.Fprintf(os.Stderr, "  A bad prompt can trick it into doing unsafe things.\n\n")
+		fmt.Fprintf(os.Stderr, "%s  Learn more: https://docs.openclaw.ai/gateway/security%s\n\n", ansiGray, ansiReset)
 
 		ok, err := confirmPrompt("I understand the risks. Continue?")
 		if err != nil {
@@ -98,7 +97,6 @@ func (c *Openclaw) Run(model string, args []string) error {
 		return windowsHint(fmt.Errorf("gateway did not start on %s", addr))
 	}
 
-	firstLaunch := c.hasBootstrap()
 	printOpenclawReady(bin, token, port, firstLaunch)
 
 	// Drop user into the TUI. On first launch, trigger the bootstrap
@@ -166,14 +164,10 @@ func printOpenclawReady(bin, token string, port int, firstLaunch bool) {
 	if firstLaunch {
 		fmt.Fprintf(os.Stderr, "%s  Quick start:%s\n", ansiBold, ansiReset)
 		fmt.Fprintf(os.Stderr, "%s    /help             see all commands%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s    /model            switch between Ollama models%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s    /think low|high   adjust reasoning depth%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s    ! <command>       run a shell command%s\n\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s  Set up later:%s\n", ansiBold, ansiReset)
 		fmt.Fprintf(os.Stderr, "%s    %s configure --section channels   connect WhatsApp, Telegram, etc.%s\n", ansiGray, bin, ansiReset)
 		fmt.Fprintf(os.Stderr, "%s    %s skills                         browse and install skills%s\n\n", ansiGray, bin, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s  The OpenClaw gateway is running in the background.%s\n", ansiGray, ansiReset)
-		fmt.Fprintf(os.Stderr, "%s  Stop it with: %s gateway stop%s\n\n", ansiGray, bin, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  The OpenClaw gateway is running in the background.%s\n", ansiYellow, ansiReset)
+		fmt.Fprintf(os.Stderr, "%s  Stop it with: %s gateway stop%s\n\n", ansiYellow, bin, ansiReset)
 	} else {
 		fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
 	}

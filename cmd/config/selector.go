@@ -13,7 +13,8 @@ const (
 	ansiBold  = "\033[1m"
 	ansiReset = "\033[0m"
 	ansiGray  = "\033[37m"
-	ansiGreen = "\033[32m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
 )
 
 // ErrCancelled is returned when the user cancels a selection.
