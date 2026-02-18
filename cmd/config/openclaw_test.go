@@ -1078,6 +1078,56 @@ func TestCheckNodeVersion(t *testing.T) {
 	})
 }
 
+func TestOpenclawHasBootstrap(t *testing.T) {
+	c := &Openclaw{}
+
+	t.Run("returns false when no workspace exists", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		if c.hasBootstrap() {
+			t.Error("expected false when no workspace exists")
+		}
+	})
+
+	t.Run("returns true when BOOTSTRAP.md exists", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		wsDir := filepath.Join(tmpDir, ".openclaw", "workspace")
+		os.MkdirAll(wsDir, 0o755)
+		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
+
+		if !c.hasBootstrap() {
+			t.Error("expected true when BOOTSTRAP.md exists")
+		}
+	})
+
+	t.Run("returns false after BOOTSTRAP.md is deleted", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		wsDir := filepath.Join(tmpDir, ".openclaw", "workspace")
+		os.MkdirAll(wsDir, 0o755)
+		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
+
+		os.Remove(filepath.Join(wsDir, "BOOTSTRAP.md"))
+
+		if c.hasBootstrap() {
+			t.Error("expected false after BOOTSTRAP.md is deleted")
+		}
+	})
+
+	t.Run("checks legacy clawdbot path", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		wsDir := filepath.Join(tmpDir, ".clawdbot", "workspace")
+		os.MkdirAll(wsDir, 0o755)
+		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
+
+		if !c.hasBootstrap() {
+			t.Error("expected true when legacy BOOTSTRAP.md exists")
+		}
+	})
+}
+
 func TestOpenclawModelConfig(t *testing.T) {
 	t.Run("nil client returns base config", func(t *testing.T) {
 		cfg := openclawModelConfig(context.Background(), nil, "llama3.2")

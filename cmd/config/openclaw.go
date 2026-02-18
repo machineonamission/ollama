@@ -63,6 +63,7 @@ func (c *Openclaw) Run(model string, args []string) error {
 			"--accept-risk",
 			"--auth-choice", "skip",
 			"--gateway-token", "ollama",
+			"--install-daemon",
 			"--skip-channels",
 			"--skip-skills",
 		)
@@ -75,30 +76,37 @@ func (c *Openclaw) Run(model string, args []string) error {
 	}
 
 	token, port := c.gatewayInfo()
+	addr := fmt.Sprintf("localhost:%d", port)
 
-	// Start gateway in the background, killing any existing instance.
-	gw := exec.Command(bin, "gateway", "run", "--force")
-	if err := gw.Start(); err != nil {
-		return windowsHint(fmt.Errorf("failed to start gateway: %w", err))
-	}
-	defer func() {
-		if gw.Process != nil {
-			_ = gw.Process.Kill()
-			_ = gw.Wait()
+	// If the gateway isn't already running (e.g. via the daemon),
+	// start it as a background child process.
+	if !portOpen(addr) {
+		gw := exec.Command(bin, "gateway", "run", "--force")
+		if err := gw.Start(); err != nil {
+			return windowsHint(fmt.Errorf("failed to start gateway: %w", err))
 		}
-	}()
+		defer func() {
+			if gw.Process != nil {
+				_ = gw.Process.Kill()
+				_ = gw.Wait()
+			}
+		}()
+	}
 
 	// Wait for gateway to accept connections.
-	addr := fmt.Sprintf("localhost:%d", port)
 	if !waitForPort(addr, 30*time.Second) {
 		return windowsHint(fmt.Errorf("gateway did not start on %s", addr))
 	}
 
 	printOpenclawReady(bin, token, port)
 
-	// Drop user into the TUI. When they exit, the deferred kill
-	// cleans up the gateway.
-	tui := exec.Command(bin, "tui")
+	// Drop user into the TUI. On first launch, trigger the bootstrap
+	// ritual with an initial message (matches openclaw's own onboarding).
+	tuiArgs := []string{"tui"}
+	if c.hasBootstrap() {
+		tuiArgs = append(tuiArgs, "--message", "Wake up, my friend!")
+	}
+	tui := exec.Command(bin, tuiArgs...)
 	tui.Stdin = os.Stdin
 	tui.Stdout = os.Stdout
 	tui.Stderr = os.Stderr
@@ -155,6 +163,16 @@ func printOpenclawReady(bin, token string, port int) {
 	fmt.Fprintf(os.Stderr, "%s  Tip: connect WhatsApp, Telegram, and more with: %s configure --section channels%s\n", ansiGray, bin, ansiReset)
 }
 
+// portOpen checks if a TCP port is currently accepting connections.
+func portOpen(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 func waitForPort(addr string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -205,6 +223,21 @@ func (c *Openclaw) onboarded() bool {
 	}
 	lastRunAt, _ := wizard["lastRunAt"].(string)
 	return lastRunAt != ""
+}
+
+// hasBootstrap checks if the BOOTSTRAP.md file exists in the workspace,
+// indicating this is the first launch and the intro ritual should trigger.
+func (c *Openclaw) hasBootstrap() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	for _, dir := range []string{".openclaw", ".clawdbot"} {
+		if _, err := os.Stat(filepath.Join(home, dir, "workspace", "BOOTSTRAP.md")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureOpenclawInstalled() (string, error) {
