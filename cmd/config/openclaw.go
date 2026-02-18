@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/ollama/ollama/envconfig"
@@ -20,6 +21,14 @@ type Openclaw struct{}
 func (c *Openclaw) String() string { return "OpenClaw" }
 
 func (c *Openclaw) Run(model string, args []string) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("OpenClaw runs best on WSL2\n\n" +
+			"Quick setup:\n" +
+			"  wsl --install\n\n" +
+			"Then run ollama launch openclaw from inside WSL.\n" +
+			"Guide: https://docs.openclaw.ai/windows")
+	}
+
 	bin, err := ensureOpenclawInstalled()
 	if err != nil {
 		return err
