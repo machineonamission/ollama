@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,6 +32,124 @@ func TestOpenclawIntegration(t *testing.T) {
 
 	t.Run("implements Editor", func(t *testing.T) {
 		var _ Editor = c
+	})
+}
+
+func TestOpenclawRunPassthroughArgs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell test binary")
+	}
+
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+	t.Setenv("PATH", tmpDir)
+
+	if err := integrationOnboarded("openclaw"); err != nil {
+		t.Fatal(err)
+	}
+
+	configDir := filepath.Join(tmpDir, ".openclaw")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{
+		"wizard": {"lastRunAt": "2026-01-01T00:00:00Z"}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := filepath.Join(tmpDir, "openclaw")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/invocations.log\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Openclaw{}
+	if err := c.Run("llama3.2", []string{"gateway", "--someflag"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "invocations.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 invocation, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "gateway --someflag" {
+		t.Fatalf("invocation = %q, want %q", lines[0], "gateway --someflag")
+	}
+}
+
+func TestOpenclawRunFirstLaunchPersistence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell test binary")
+	}
+
+	oldHook := DefaultConfirmPrompt
+	DefaultConfirmPrompt = func(prompt string) (bool, error) {
+		return true, nil
+	}
+	defer func() { DefaultConfirmPrompt = oldHook }()
+
+	t.Run("success persists onboarding flag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		t.Setenv("PATH", tmpDir)
+
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Mark OpenClaw onboarding complete so Run takes passthrough path directly.
+		if err := os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{
+			"wizard": {"lastRunAt": "2026-01-01T00:00:00Z"}
+		}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "openclaw"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		c := &Openclaw{}
+		if err := c.Run("llama3.2", []string{"gateway", "--status"}); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		integrationConfig, err := loadIntegration("openclaw")
+		if err != nil {
+			t.Fatalf("loadIntegration() error = %v", err)
+		}
+		if !integrationConfig.Onboarded {
+			t.Fatal("expected onboarding flag to be persisted after successful run")
+		}
+	})
+
+	t.Run("failure does not persist onboarding flag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setTestHome(t, tmpDir)
+		t.Setenv("PATH", tmpDir)
+
+		configDir := filepath.Join(tmpDir, ".openclaw")
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "openclaw.json"), []byte(`{
+			"wizard": {"lastRunAt": "2026-01-01T00:00:00Z"}
+		}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "openclaw"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		c := &Openclaw{}
+		if err := c.Run("llama3.2", []string{"gateway", "--status"}); err == nil {
+			t.Fatal("expected run failure")
+		}
+		integrationConfig, err := loadIntegration("openclaw")
+		if err == nil && integrationConfig.Onboarded {
+			t.Fatal("expected onboarding flag to remain unset after failed run")
+		}
 	})
 }
 
@@ -1107,56 +1226,6 @@ func TestPrintOpenclawReady(t *testing.T) {
 	})
 }
 
-func TestOpenclawHasBootstrap(t *testing.T) {
-	c := &Openclaw{}
-
-	t.Run("returns false when no workspace exists", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		setTestHome(t, tmpDir)
-		if c.hasBootstrap() {
-			t.Error("expected false when no workspace exists")
-		}
-	})
-
-	t.Run("returns true when BOOTSTRAP.md exists", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		setTestHome(t, tmpDir)
-		wsDir := filepath.Join(tmpDir, ".openclaw", "workspace")
-		os.MkdirAll(wsDir, 0o755)
-		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
-
-		if !c.hasBootstrap() {
-			t.Error("expected true when BOOTSTRAP.md exists")
-		}
-	})
-
-	t.Run("returns false after BOOTSTRAP.md is deleted", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		setTestHome(t, tmpDir)
-		wsDir := filepath.Join(tmpDir, ".openclaw", "workspace")
-		os.MkdirAll(wsDir, 0o755)
-		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
-
-		os.Remove(filepath.Join(wsDir, "BOOTSTRAP.md"))
-
-		if c.hasBootstrap() {
-			t.Error("expected false after BOOTSTRAP.md is deleted")
-		}
-	})
-
-	t.Run("checks legacy clawdbot path", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		setTestHome(t, tmpDir)
-		wsDir := filepath.Join(tmpDir, ".clawdbot", "workspace")
-		os.MkdirAll(wsDir, 0o755)
-		os.WriteFile(filepath.Join(wsDir, "BOOTSTRAP.md"), []byte("# Bootstrap"), 0o644)
-
-		if !c.hasBootstrap() {
-			t.Error("expected true when legacy BOOTSTRAP.md exists")
-		}
-	})
-}
-
 func TestOpenclawModelConfig(t *testing.T) {
 	t.Run("nil client returns base config", func(t *testing.T) {
 		cfg := openclawModelConfig(context.Background(), nil, "llama3.2")
@@ -1369,21 +1438,23 @@ func TestIntegrationOnboarded(t *testing.T) {
 		tmpDir := t.TempDir()
 		setTestHome(t, tmpDir)
 
-		if IntegrationOnboarded("openclaw") {
+		integrationConfig, err := loadIntegration("openclaw")
+		if err == nil && integrationConfig.Onboarded {
 			t.Error("expected false for fresh config")
 		}
 	})
 
-	t.Run("returns true after SetIntegrationOnboarded", func(t *testing.T) {
+	t.Run("returns true after integrationOnboarded", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		setTestHome(t, tmpDir)
 		os.MkdirAll(filepath.Join(tmpDir, ".ollama"), 0o755)
 
-		if err := SetIntegrationOnboarded("openclaw"); err != nil {
+		if err := integrationOnboarded("openclaw"); err != nil {
 			t.Fatal(err)
 		}
-		if !IntegrationOnboarded("openclaw") {
-			t.Error("expected true after SetIntegrationOnboarded")
+		integrationConfig, err := loadIntegration("openclaw")
+		if err != nil || !integrationConfig.Onboarded {
+			t.Error("expected true after integrationOnboarded")
 		}
 	})
 
@@ -1392,10 +1463,11 @@ func TestIntegrationOnboarded(t *testing.T) {
 		setTestHome(t, tmpDir)
 		os.MkdirAll(filepath.Join(tmpDir, ".ollama"), 0o755)
 
-		if err := SetIntegrationOnboarded("OpenClaw"); err != nil {
+		if err := integrationOnboarded("OpenClaw"); err != nil {
 			t.Fatal(err)
 		}
-		if !IntegrationOnboarded("openclaw") {
+		integrationConfig, err := loadIntegration("openclaw")
+		if err != nil || !integrationConfig.Onboarded {
 			t.Error("expected true when set with different case")
 		}
 	})
@@ -1408,13 +1480,14 @@ func TestIntegrationOnboarded(t *testing.T) {
 		if err := SaveIntegration("openclaw", []string{"llama3.2", "mistral"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := SetIntegrationOnboarded("openclaw"); err != nil {
+		if err := integrationOnboarded("openclaw"); err != nil {
 			t.Fatal(err)
 		}
 
 		// Verify onboarded is set
-		if !IntegrationOnboarded("openclaw") {
-			t.Error("expected true after SetIntegrationOnboarded")
+		integrationConfig, err := loadIntegration("openclaw")
+		if err != nil || !integrationConfig.Onboarded {
+			t.Error("expected true after integrationOnboarded")
 		}
 
 		// Verify models are preserved

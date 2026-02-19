@@ -31,7 +31,10 @@ func (c *Openclaw) Run(model string, args []string) error {
 		return err
 	}
 
-	firstLaunch := !IntegrationOnboarded("openclaw")
+	firstLaunch := true
+	if integrationConfig, err := loadIntegration("openclaw"); err == nil {
+		firstLaunch = !integrationConfig.Onboarded
+	}
 
 	if firstLaunch {
 		fmt.Fprintf(os.Stderr, "\n%sSecurity%s\n\n", ansiBold, ansiReset)
@@ -45,10 +48,6 @@ func (c *Openclaw) Run(model string, args []string) error {
 		}
 		if !ok {
 			return nil
-		}
-
-		if err := SetIntegrationOnboarded("openclaw"); err != nil {
-			return fmt.Errorf("failed to save onboarding state: %w", err)
 		}
 	}
 
@@ -71,6 +70,25 @@ func (c *Openclaw) Run(model string, args []string) error {
 		if err := cmd.Run(); err != nil {
 			return windowsHint(fmt.Errorf("openclaw onboarding failed: %w\n\nTry running: openclaw onboard", err))
 		}
+	}
+
+	// When extra args are passed through, run exactly what the user asked for
+	// after setup and skip the built-in gateway+TUI convenience flow.
+	if len(args) > 0 {
+		cmd := exec.Command(bin, args...)
+		cmd.Env = openclawEnv()
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return windowsHint(err)
+		}
+		if firstLaunch {
+			if err := integrationOnboarded("openclaw"); err != nil {
+				return fmt.Errorf("failed to save onboarding state: %w", err)
+			}
+		}
+		return nil
 	}
 
 	token, port := c.gatewayInfo()
@@ -100,7 +118,7 @@ func (c *Openclaw) Run(model string, args []string) error {
 	printOpenclawReady(bin, token, port, firstLaunch)
 
 	// Drop user into the TUI. On first launch, trigger the bootstrap
-	// ritual with an initial message (matches openclaw's own onboarding).
+	// ritual with an initial message.
 	tuiArgs := []string{"tui"}
 	if firstLaunch {
 		tuiArgs = append(tuiArgs, "--message", "Wake up, my friend!")
@@ -112,6 +130,12 @@ func (c *Openclaw) Run(model string, args []string) error {
 	tui.Stderr = os.Stderr
 	if err := tui.Run(); err != nil {
 		return windowsHint(err)
+	}
+
+	if firstLaunch {
+		if err := integrationOnboarded("openclaw"); err != nil {
+			return fmt.Errorf("failed to save onboarding state: %w", err)
+		}
 	}
 	return nil
 }
@@ -258,21 +282,6 @@ func (c *Openclaw) onboarded() bool {
 	return lastRunAt != ""
 }
 
-// hasBootstrap checks if the BOOTSTRAP.md file exists in the workspace,
-// indicating this is the first launch and the intro ritual should trigger.
-func (c *Openclaw) hasBootstrap() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	for _, dir := range []string{".openclaw", ".clawdbot"} {
-		if _, err := os.Stat(filepath.Join(home, dir, "workspace", "BOOTSTRAP.md")); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
 func ensureOpenclawInstalled() (string, error) {
 	if _, err := exec.LookPath("openclaw"); err == nil {
 		return "openclaw", nil
@@ -283,10 +292,11 @@ func ensureOpenclawInstalled() (string, error) {
 
 	if _, err := exec.LookPath("npm"); err != nil {
 		return "", fmt.Errorf("openclaw is not installed and npm was not found\n\n" +
-			"To install OpenClaw, first install Node.js:\n" +
+			"Install Node.js first:\n" +
 			"  https://nodejs.org/\n\n" +
-			"Then run:\n" +
-			"  npm install -g openclaw@latest")
+			"Then rerun:\n" +
+			"  ollama launch\n" +
+			"and select OpenClaw")
 	}
 
 	ok, err := confirmPrompt("OpenClaw is not installed. Install with npm?")

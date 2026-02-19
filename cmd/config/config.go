@@ -155,8 +155,8 @@ func SaveIntegration(appName string, models []string) error {
 	return save(cfg)
 }
 
-// SetIntegrationOnboarded marks an integration as onboarded in ollama's config.
-func SetIntegrationOnboarded(appName string) error {
+// integrationOnboarded marks an integration as onboarded in ollama's config.
+func integrationOnboarded(appName string) error {
 	cfg, err := load()
 	if err != nil {
 		return err
@@ -172,31 +172,22 @@ func SetIntegrationOnboarded(appName string) error {
 	return save(cfg)
 }
 
-// IntegrationOnboarded returns true if the integration has been onboarded through ollama.
-func IntegrationOnboarded(appName string) bool {
-	ic, err := loadIntegration(appName)
-	if err != nil {
-		return false
-	}
-	return ic.Onboarded
-}
-
 // IntegrationModel returns the first configured model for an integration, or empty string if not configured.
 func IntegrationModel(appName string) string {
-	ic, err := loadIntegration(appName)
-	if err != nil || len(ic.Models) == 0 {
+	integrationConfig, err := loadIntegration(appName)
+	if err != nil || len(integrationConfig.Models) == 0 {
 		return ""
 	}
-	return ic.Models[0]
+	return integrationConfig.Models[0]
 }
 
 // IntegrationModels returns all configured models for an integration, or nil.
 func IntegrationModels(appName string) []string {
-	ic, err := loadIntegration(appName)
-	if err != nil || len(ic.Models) == 0 {
+	integrationConfig, err := loadIntegration(appName)
+	if err != nil || len(integrationConfig.Models) == 0 {
 		return nil
 	}
-	return ic.Models
+	return integrationConfig.Models
 }
 
 // LastModel returns the last model that was run, or empty string if none.
@@ -264,12 +255,12 @@ func loadIntegration(appName string) (*integration, error) {
 		return nil, err
 	}
 
-	ic, ok := cfg.Integrations[strings.ToLower(appName)]
+	integrationConfig, ok := cfg.Integrations[strings.ToLower(appName)]
 	if !ok {
 		return nil, os.ErrNotExist
 	}
 
-	return ic, nil
+	return integrationConfig, nil
 }
 
 func saveAliases(appName string, aliases map[string]string) error {
@@ -302,8 +293,8 @@ func listIntegrations() ([]integration, error) {
 	}
 
 	result := make([]integration, 0, len(cfg.Integrations))
-	for _, ic := range cfg.Integrations {
-		result = append(result, *ic)
+	for _, integrationConfig := range cfg.Integrations {
+		result = append(result, *integrationConfig)
 	}
 
 	return result, nil
