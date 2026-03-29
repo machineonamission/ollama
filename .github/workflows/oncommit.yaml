@@ -8,8 +8,25 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  CGO_CFLAGS: '-O3'
+  CGO_CXXFLAGS: '-O3'
 
 jobs:
+  setup-environment:
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      GOFLAGS: ${{ steps.goflags.outputs.GOFLAGS }}
+      VERSION: ${{ steps.goflags.outputs.VERSION }}
+      vendorsha: ${{ steps.changes.outputs.vendorsha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set environment
+        id: goflags
+        run: |
+          echo GOFLAGS="'-ldflags=-w -s \"-X=github.com/ollama/ollama/version.Version=${GITHUB_REF_NAME#v}\" \"-X=github.com/ollama/ollama/server.mode=release\"'" | tee -a $GITHUB_OUTPUT
+          echo VERSION="${GITHUB_REF_NAME#v}" | tee -a $GITHUB_OUTPUT
+          echo vendorsha=$(make -f Makefile.sync print-base) | tee -a $GITHUB_OUTPUT
   # ---------------------------------------------------
   # JOB 1: Build and Push Architecture-Specific Digests
   # ---------------------------------------------------
@@ -21,11 +38,23 @@ jobs:
           - os: linux
             arch: amd64
             runner: ubuntu-latest
+            build-args: |
+              CGO_CFLAGS
+              CGO_CXXFLAGS
+              GOFLAGS
           - os: linux
             arch: arm64
             runner: ubuntu-24.04-arm # GitHub's native ARM runner!
+            build-args: |
+              CGO_CFLAGS
+              CGO_CXXFLAGS
+              GOFLAGS
 
     runs-on: ${{ matrix.runner }}
+
+    needs: setup-environment
+    env:
+      GOFLAGS: ${{ needs.setup-environment.outputs.GOFLAGS }}
 
     # Required to push to GHCR
     permissions:
@@ -58,6 +87,8 @@ jobs:
           # ZERO-SETUP CACHING: Uses GitHub Actions native cache storage
           cache-from: type=gha,scope=build-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+          build-args: ${{ matrix.build-args }}
+          
 
       # Create an empty file named after the digest.
       # This is a clever, lightweight way to pass the digest strings between jobs.
